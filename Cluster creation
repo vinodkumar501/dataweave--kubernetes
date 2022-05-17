@@ -1,0 +1,5 @@
+cluster cretation k8s using GKE 
+
+deployment of postgres on gke 
+
+https://www.sumologic.com/blog/kubernetes-deploy-postgres/
