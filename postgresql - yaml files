@@ -1,2 +1,67 @@
-#yaml files 
+#https://www.sumologic.com/blog/kubernetes-deploy-postgres/
+# 1.SECRET yaml #https://kubernetes.io/docs/concepts/storage/persistent-volumes/
+# 2.PV CREATION yaml ##https://kubernetes.io/docs/concepts/storage/persistent-volumes/
 
+---
+apiVersion: V1
+kind: Secret
+metadata:
+ name: postgres-secret-config
+type: Opaque
+data:
+ password: dmlub2QK
+ 
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+ name: postgres-pv-volume
+spec:
+ storageClassName: default
+ capacity:
+   storage: 5Gi
+ accessModes:
+   - ReadWriteOnce
+ hostPath:
+   path: "/mnt/data"
+  
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc-volume
+  namespace: default
+spec:
+  storageClassName: "default"          # Empty string must be explicitly set otherwise default StorageClass will be set
+  volumeName: postgres-pv-volume
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
+  
