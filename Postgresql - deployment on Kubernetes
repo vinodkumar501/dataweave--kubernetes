@@ -1,0 +1,336 @@
+#link
+https://www.sumologic.com/blog/kubernetes-deploy-postgres/
+
+=======================================================================================
+
+Kubernetes is an orchestration platform that allows containers to be deployed in an automated and resilient way, abstracting many of the manual steps of rolling upgrades and scaling. You will usually want to deploy database applications (like PostgreSQL) as well, so that your applications can leverage their features within the cluster.
+
+In this blog, we will show you some simple steps for deploying and running a PostgreSQL database on Kubernetes. We will explore a simple use case in which a developer wants to have a single PostgreSQL instance for testing, and then we’ll introduce an advanced use case in which there are a few options for deploying a more configurable instance of PostgreSQL.
+
+Let’s get started.
+
+Prerequisites
+In order to follow along, you will need to have:
+
+a Kubernetes cluster. I’ve created mine using Digital Ocean, but you could use Kind if you are working locally.
+
+some working knowledge of Kubectl.
+
+Before we start, we will explain the basic steps for deploying a single instance of PostgreSQL on Kubernetes.
+
+Simple PostgreSQL Deployment
+Dockerize PostgreSQL
+Kubernetes pulls Docker images from a registry and deploys them based on a configuration file. To finish this step, you need a Docker image for PostgreSQL. You can create one on your own using these basic steps. Or, better yet, you can use the official image from Docker Hub. In this post, we will be using the latest postgres:11 image.
+
+Create Your Connection Configuration and Secrets
+You need to store some connection configuration for the PostgreSQL instance using the Kubernetes secrets config. This is to ensure that sensitive information (like database credentials) is not stored in plain sight.
+
+Note that this provider stores the secrets as base64 strings by default, so you’ll need to enable encryption at rest for better security.
+
+Once you have everything configured, you need to create the configuration for those secrets. We will use the following values for the database password:
+
+❯ echo "password" | base64
+
+cGFzc3dvcmQK
+
+Then, create a secrets config file and apply it on the cluster:
+
+> cat postgres-secrets.yml
+
+apiVersion: v1
+
+kind: Secret
+
+metadata:
+
+name: postgres-secret-config
+
+type: Opaque
+
+data:
+
+password: cG9zdGdyZXMK
+
+Here, we used kind: Secret to instruct Kubernetes to use a secrets provider to store the data. The name that it needs to use to store those values is under the key postgres-secret-config. Finally, we provided the key/value pairs that we need to secretly store in the data section.
+
+Now, we apply this config and then verify that the contents are stored correctly:
+
+❯ kubectl apply -f postgres-secrets.yml
+
+secret/postgres-secret-config created
+
+❯ kubectl get secret postgres-secret-config -o yaml
+
+apiVersion: v1
+
+data:
+
+password: cG9zdGdyZXMK
+
+....
+
+Create PersistentVolume and PersistentVolumeClaim
+Next, you want to create permanent file storage for your database data. This is because the Docker instance does not persist any information when the container no longer exists (by default).
+
+The solution is to mount a filesystem to store the data. Kubernetes has a different configuration format for those operations. First, you create a PersistentVolume manifest that describes the type of volumes you want to use. Next, you create a PersistentVolumeClaim that requests the usage for that particular PersistentVolume type based on the same storage class.
+
+For our example, we will use the current node filesystem as a volume, but it’s better to use a StorageClass suitable for database operations.
+
+First, we define the configuration for the PersistentVolume:
+
+> cat pv-volume.yml
+
+apiVersion: v1
+
+kind: PersistentVolume
+
+metadata:
+
+name: postgres-pv-volume
+
+labels:
+
+type: local
+
+spec:
+
+storageClassName: manual
+
+capacity:
+
+storage: 5Gi
+
+accessModes:
+
+- ReadWriteOnce
+
+hostPath:
+
+path: "/mnt/data"
+
+In this configuration, we instructed it to reserve 5GB of read-write storage at /mnt/data on the cluster’s node.
+
+Now, we apply it and check that the persistent volume is available:
+
+❯ kubectl apply -f pv-volume.yml
+
+persistentvolume/postgres-pv-volume created
+
+❯ kubectl get pv postgres-pv-volume
+
+NAME CAPACITY ACCESS MODES RECLAIM POLICY STATUS CLAIM STORAGECLASS REASON AGE
+
+postgres-pv-volume 5Gi RWO Retain Available manual 51s
+
+We need to follow up with a PersistentVolumeClaim configuration that matches the details of the previous manifest:
+
+> cat pv-claim.yml
+
+apiVersion: v1
+
+kind: PersistentVolumeClaim
+
+metadata:
+
+name: postgres-pv-claim
+
+spec:
+
+storageClassName: manual
+
+accessModes:
+
+- ReadWriteOnce
+
+resources:
+
+requests:
+
+storage: 1Gi
+
+In this configuration, we requested a PersistentVolumeClaim for 1GB of data using the same storage class name. This is an important parameter because it enables Kubernetes to reserve 1GB of the available 5GB of the same storage class for this claim.
+
+Now, we apply it and check that the persistent volume claim is bound:
+
+❯ kubectl apply -f pv-claim.yml
+
+persistentvolumeclaim/postgres-pv-claim created
+
+❯ kubectl get pvc postgres-pv-claim
+
+NAME STATUS VOLUME CAPACITY ACCESS MODES STORAGECLASS AGE
+
+postgres-pv-claim Bound postgres-pv-volume 1Gi RWO manual 5m32s
+
+Create Deployment
+Next, we need to issue a deployment config for our instance that uses the settings from the postgres-secret-config secret name. We also need to reference the PersistentVolume and PersistentVolumeClaim that we created earlier. This is what it looks like:
+
+> cat postgres-deployment.yml
+
+apiVersion: apps/v1
+
+kind: Deployment
+
+metadata:
+
+name: postgres
+
+spec:
+
+replicas: 1
+
+selector:
+
+matchLabels:
+
+app: postgres
+
+template:
+
+metadata:
+
+labels:
+
+app: postgres
+
+spec:
+
+volumes:
+
+- name: postgres-pv-storage
+
+persistentVolumeClaim:
+
+claimName: postgres-pv-claim
+
+containers:
+
+- name: postgres
+
+image: postgres:11
+
+imagePullPolicy: IfNotPresent
+
+ports:
+
+- containerPort: 5432
+
+env:
+
+- name: POSTGRES_PASSWORD
+
+valueFrom:
+
+secretKeyRef:
+
+name: postgres-secret-config
+
+key: password
+
+- name: PGDATA
+
+value: /var/lib/postgresql/data/pgdata
+
+volumeMounts:
+
+- mountPath: /var/lib/postgresql/data
+
+name: postgres-pv-storage
+
+Here, we glued all of the configuration that we defined earlier with the secret config and the persistent volume mounts. We used the apiVersion: apps/v1 deployment config, which requires us to specify quite a few lines, such as selector and metadata fields. Then, we added details of the container image and the image pull policy. This is all necessary to ensure that we have the right volume and secrets used for that container.
+
+Now, we apply the deployment and check that is available and healthy:
+
+❯ kubectl apply -f postgres-deployment.yml
+
+deployment.apps/postgres created
+
+❯ kubectl get deployments
+
+NAME READY UP-TO-DATE AVAILABLE AGE
+
+postgres 1/1 1 1 28s
+
+Create Service
+You can also create a service to expose the PostgreSQL server. You have several options to do so, like configuring a different port or exposing the NodePort or LoadBalancer. For the sake of simplicity, we will show you how to use NodePort, which exposes the service on the Node's IP at a static port.
+
+You can use the following service manifest:
+
+> cat postgres-service.yml
+
+apiVersion: v1
+
+kind: Service
+
+metadata:
+
+name: postgres
+
+labels:
+
+app: postgres
+
+spec:
+
+type: NodePort
+
+ports:
+
+- port: 5432
+
+selector:
+
+app: postgres
+
+Here, we used the postgres app selector to correlate the postgres deployment as a NodePort service. This will open the host and port the postgres server pair to <node_server_ip>:<node_port>.
+
+Now, we apply the service and check that is available and has been assigned a port:
+
+❯ kubectl apply -f postgres-service.yml
+
+service/postgres created
+
+❯ kubectl get service postgres
+
+NAME TYPE CLUSTER-IP EXTERNAL-IP PORT(S) AGE
+
+postgres NodePort 10.245.89.187 <none> 5432:31785/TCP 21m
+
+Test the Connection to the Database
+You should be able to connect to the database internally using the following commands:
+
+❯ kubectl get pods
+
+NAME READY STATUS RESTARTS AGE
+
+postgres-57f4746d96-7z5q8 1/1 Running 0 30m
+
+❯ kubectl exec -it postgres-57f4746d96-7z5q8 -- psql -U postgres
+
+There is also a handy way to store the pod name in a variable:
+
+POD=`kubectl get pods -l app=postgres -o wide | grep -v NAME | awk '{print $1}'`
+
+You could also use another Docker container to connect through the psql command:
+
+export POSTGRES_PASSWORD=$(kubectl get secret postgres-secret-config -o jsonpath="{.data.password}" | base64 --decode)
+
+❯ kubectl run postgres-client --rm --tty -i --restart='Never' --image postgres:11 --env="PGPASSWORD=$POSTGRES_PASSWORD" --command -- psql -h postgres -U postgres
+
+If you don't see a command prompt, try pressing enter.
+
+postgres=#
+
+Now, you’re ready to perform queries.
+
+Advanced PostgreSQL Deployment
+In the previous example, we only performed a single instance of PostgreSQL for development purposes. If you want a more enterprise-ready solution, you could:
+
+Use the Bitnami PostgreSQL Deployment offerings: Bitnami supports multiple types of deployments (including helm) and supports many configuration options for large scale deployments.
+
+Use the Zalando PostgreSQL Operator offering: This is a high-availability solution from Zalando that relies on their existing Patroni-based cluster template.
+
+Configuring and deploying advanced solutions is a bit too much for this post, so we’ll leave you to explore them on your own.
+
+Next Steps
+If you followed along with us, you’ve now mastered the process of deploying a simple PostgreSQL instance on Kubernetes and learned some best practices for handling secrets. For further optimizations, you may want to consider changing the PersistentVolume policy from delete to retain in order to prevent it from automatically deleting volumes when users delete volume claims.
